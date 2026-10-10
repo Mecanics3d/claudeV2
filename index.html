@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Servo micro:bit</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 20px;
+         display: flex; flex-direction: column; align-items: center; gap: 18px; }
+  h1 { font-size: 1.3rem; margin: 8px 0 0; }
+  #status { font-size: .95rem; opacity: .8; text-align: center; }
+  #angle { font-size: 4rem; font-weight: 700; }
+  .box { width: 100%; max-width: 420px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 12px; align-items: center; }
+  .scale { display: flex; justify-content: space-between; font-size: .8rem; opacity: .6; }
+  label { font-size: .95rem; opacity: .8; }
+  input[type=range] { width: 100%; height: 44px; accent-color: #2563eb; }
+  button { flex: 1; font-size: 1.3rem; padding: 18px 0; border: 0; border-radius: 14px;
+           background: #2563eb; color: #fff; touch-action: manipulation;
+           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .35; }
+  #connect { background: #16a34a; }
+  #reset { background: #6b7280; padding: 24px 0; }
+  .trimval { min-width: 90px; text-align: center; font-size: 1.6rem; font-weight: 600; }
+  #trim0 { flex: 0 0 auto; padding: 18px 16px; background: #6b7280; font-size: 1rem; }
+</style>
+</head>
+<body>
+  <h1>Servo micro:bit <small style="opacity:.4">v9</small></h1>
+  <div id="status">Non connecté</div>
+  <div id="angle">--°</div>
+
+  <div class="box">
+    <button id="connect" style="flex:none">Connecter le micro:bit</button>
+  </div>
+
+  <div class="box">
+    <input type="range" id="slider" min="65" max="125" step="1" value="90" disabled>
+    <div class="scale"><span>65° gauche</span><span>90°</span><span>droite 125°</span></div>
+    <button id="reset" disabled>Retour 90°</button>
+  </div>
+
+  <div class="box">
+    <label>Trim : décalage du centre (±10°)</label>
+    <div class="row">
+      <button id="trimMinus" disabled>−1°</button>
+      <div class="trimval" id="trimval">0°</div>
+      <button id="trimPlus" disabled>+1°</button>
+      <button id="trim0" disabled>0</button>
+    </div>
+  </div>
+
+<script>
+// UUID du service UART du micro:bit (base B5A3, différente de Nordic)
+const SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // page -> micro:bit (écriture)
+const TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // micro:bit -> page (indication)
+const TRIM_MAX = 10;
+
+let device, rxChar, buffer = '', dragging = false, sending = false;
+const slot = {};                       // dernière commande à envoyer, par type
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder(), dec = new TextDecoder();
+const errText = e => (e && (e.name || e.message)) ? ((e.name || '') + ' ' + (e.message || '')).trim() : String(e);
+
+// trim mémorisé sur le téléphone, renvoyé au micro:bit à chaque connexion
+let trim = 0;
+try { trim = parseInt(localStorage.getItem('servoTrim')) || 0; } catch (e) {}
+const showTrim = t => $('trimval').textContent = (t > 0 ? '+' : '') + t + '°';
+showTrim(trim);
+
+function setConnected(on) {
+  ['slider', 'reset', 'trimMinus', 'trimPlus', 'trim0'].forEach(id => $(id).disabled = !on);
+  $('connect').textContent = on ? 'Déconnecter' : 'Connecter le micro:bit';
+  $('status').textContent = on ? 'Connecté à ' + device.name : 'Non connecté';
+  if (!on) { $('angle').textContent = '--°'; rxChar = null; for (const k in slot) delete slot[k]; }
+}
+
+// envoi "dernière valeur gagnante" : pas d'embouteillage quand on glisse le curseur
+function send(key, cmd) {
+  if (!rxChar) return;
+  slot[key] = cmd;
+  flush();
+}
+async function flush() {
+  if (sending) return;
+  sending = true;
+  try {
+    for (let k; (k = Object.keys(slot)[0]) !== undefined; ) {
+      const cmd = slot[k]; delete slot[k];
+      if (!rxChar) break;
+      const data = enc.encode(cmd + '\n');
+      if (rxChar.properties.writeWithoutResponse) await rxChar.writeValueWithoutResponse(data);
+      else await rxChar.writeValue(data);
+    }
+  } catch (e) { $('status').textContent = 'Erreur envoi : ' + errText(e); }
+  sending = false;
+}
+
+// réception : "A:90,T:0"
+function onData(e) {
+  buffer += dec.decode(e.target.value);
+  let i;
+  while ((i = buffer.indexOf('\n')) >= 0) {
+    const line = buffer.slice(0, i).trim();
+    buffer = buffer.slice(i + 1);
+    line.split(',').forEach(part => {
+      const [k, v] = part.split(':');
+      if (k === 'A') {
+        $('angle').textContent = v + '°';
+        if (!dragging) $('slider').value = v;
+      } else if (k === 'T') {
+        showTrim(parseInt(v) || 0);
+      }
+    });
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    $('status').textContent = 'Web Bluetooth indisponible : ouvrez cette page dans Bluefy';
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,           // choisissez « BBC micro:bit [xxxxx] » dans la liste
+      optionalServices: [SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', () => setConnected(false));
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    rxChar = await service.getCharacteristic(RX);
+    const txChar = await service.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', onData);
+    setConnected(true);
+    send('T', 'T' + trim);   // renvoie le trim mémorisé
+    send('?', '?');          // demande l'état actuel
+  } catch (e) {
+    $('status').textContent = 'Échec de connexion : ' + errText(e);
+  }
+}
+
+function setTrim(t) {
+  trim = Math.max(-TRIM_MAX, Math.min(TRIM_MAX, t));
+  showTrim(trim);
+  try { localStorage.setItem('servoTrim', String(trim)); } catch (e) {}
+  send('T', 'T' + trim);
+}
+
+// curseur
+const slider = $('slider');
+slider.addEventListener('pointerdown', () => dragging = true);
+['pointerup', 'pointercancel', 'change'].forEach(ev => slider.addEventListener(ev, () => dragging = false));
+slider.addEventListener('input', () => {
+  $('angle').textContent = slider.value + '°';
+  send('S', 'S' + slider.value);
+});
+
+$('connect').onclick = () => {
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  else connect();
+};
+$('reset').onclick = () => { slider.value = 90; $('angle').textContent = '90°'; send('C', 'C'); };
+$('trimMinus').onclick = () => setTrim(trim - 1);
+$('trimPlus').onclick  = () => setTrim(trim + 1);
+$('trim0').onclick     = () => setTrim(0);
+</script>
+</body>
+</html>
