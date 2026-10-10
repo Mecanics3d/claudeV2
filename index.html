@@ -35,7 +35,7 @@
 </style>
 </head>
 <body>
-  <h1>Servo micro:bit <small style="opacity:.4">v10</small></h1>
+  <h1>Servo micro:bit <small style="opacity:.4">v12</small></h1>
   <div id="status">Non connecté</div>
   <div id="angle">--°</div>
 
@@ -44,8 +44,8 @@
   </div>
 
   <div class="box">
-    <input type="range" id="slider" min="65" max="125" step="1" value="90" disabled>
-    <div class="scale"><span>65° gauche</span><span>90°</span><span>droite 125°</span></div>
+    <input type="range" id="slider" min="-100" max="100" step="1" value="0" disabled>
+    <div class="scale"><span>55° gauche</span><span>90°</span><span>droite 125°</span></div>
     <button id="reset" disabled>Retour 90°</button>
   </div>
 
@@ -65,6 +65,13 @@ const SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 const RX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // page -> micro:bit (écriture)
 const TX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // micro:bit -> page (indication)
 const TRIM_MAX = 10;
+const A_MIN = 55, A_CENTER = 90, A_MAX = 125;
+// le milieu du curseur = 90° ; 35° de chaque côté (55° à 125°)
+const toAngle = v => Math.round(v <= 0 ? A_CENTER + v * (A_CENTER - A_MIN) / 100
+                                       : A_CENTER + v * (A_MAX - A_CENTER) / 100);
+const toPos = a => a <= A_CENTER ? (a - A_CENTER) * 100 / (A_CENTER - A_MIN)
+                                 : (a - A_CENTER) * 100 / (A_MAX - A_CENTER);
+let lastAngle = null;
 
 let device, rxChar, buffer = '', dragging = false, sending = false;
 const slot = {};                       // dernière commande à envoyer, par type
@@ -117,7 +124,7 @@ function onData(e) {
       const [k, v] = part.split(':');
       if (k === 'A') {
         $('angle').textContent = v + '°';
-        if (!dragging) $('slider').value = v;
+        if (!dragging) $('slider').value = toPos(parseInt(v));
       } else if (k === 'T') {
         showTrim(parseInt(v) || 0);
       }
@@ -162,15 +169,16 @@ const slider = $('slider');
 slider.addEventListener('pointerdown', () => dragging = true);
 ['pointerup', 'pointercancel', 'change'].forEach(ev => slider.addEventListener(ev, () => dragging = false));
 slider.addEventListener('input', () => {
-  $('angle').textContent = slider.value + '°';
-  send('S', 'S' + slider.value);
+  const a = toAngle(parseInt(slider.value));
+  $('angle').textContent = a + '°';
+  if (a !== lastAngle) { lastAngle = a; send('S', 'S' + a); }
 });
 
 $('connect').onclick = () => {
   if (device && device.gatt.connected) device.gatt.disconnect();
   else connect();
 };
-$('reset').onclick = () => { slider.value = 90; $('angle').textContent = '90°'; send('C', 'C'); };
+$('reset').onclick = () => { slider.value = 0; lastAngle = A_CENTER; $('angle').textContent = '90°'; send('C', 'C'); };
 $('trimMinus').onclick = () => setTrim(trim - 1);
 $('trimPlus').onclick  = () => setTrim(trim + 1);
 $('trim0').onclick     = () => setTrim(0);
